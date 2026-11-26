@@ -1,0 +1,47 @@
+# Cada 10 minutos genera los archivos del radar de lluvia y los publica en la rama "data".
+# Los cubitos los descargan de:
+#   https://raw.githubusercontent.com/<usuario>/<repo>/data/radar_<km>.bin
+name: radar
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"     # GitHub puede retrasarlo unos minutos
+  workflow_dispatch:            # botón "Run workflow" para lanzarlo a mano
+
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      # caché y archivos de la ejecución anterior (si la rama "data" existe)
+      - name: Recuperar la rama data
+        run: |
+          git fetch --depth=1 origin data:data || true
+          mkdir -p data
+          if git rev-parse --verify data >/dev/null 2>&1; then
+            git --work-tree=data checkout data -- . || true
+            git reset -q
+          fi
+
+      - name: Generar el radar
+        run: python3 generate.py --data data
+
+      # publicar la rama data con un solo commit (sin acumular historial)
+      - name: Publicar
+        run: |
+          cd data
+          git init -q -b data
+          git config user.name "radar-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "radar $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data:data
