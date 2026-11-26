@@ -1,3 +1,4 @@
 [
-  {"name": "CERDANYOLA", "lat": 41.4911, "lon": 2.1408}
+  {"lat":41.4911,"lon":2.1408,"name":"CERDANYOLA"},
+  {"lat":48.2188,"lon":7.7775,"name":"HERBOLZHEIM"}
 ]
