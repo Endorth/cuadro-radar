@@ -5,7 +5,9 @@ name: radar
 
 on:
   schedule:
-    - cron: "*/10 * * * *"     # GitHub puede retrasarlo unos minutos
+    # Minutos desplazados (no :00, :10…): GitHub retrasa o descarta las ejecuciones programadas
+    # en los minutos "redondos" cuando tiene mucha carga. Con "*/10" no llegó a ejecutarse.
+    - cron: "4,14,24,34,44,54 * * * *"
   workflow_dispatch:            # botón "Run workflow" para lanzarlo a mano
 
 concurrency:
