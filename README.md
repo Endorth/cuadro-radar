@@ -10,7 +10,8 @@ rama `data`; los cubitos descargan solo el archivo de su radio y animan las 5 ú
 - `tinypng.py` — decodificador PNG en Python puro (sin dependencias).
 - `.github/workflows/radar.yml` — ejecución cada 10 min y publicación en la rama `data`.
 
-Archivos publicados: `https://raw.githubusercontent.com/<usuario>/<repo>/data/radar_<clave>_<km>.bin`
+Archivos publicados: `https://raw.githubusercontent.com/<usuario>/<repo>/data/radar2_<clave>_<km>.bin`
+(`radar2_` lleva además los pueblos cercanos; `radar_` es el formato anterior, sin pueblos).
 
 ## Formato de `radar_<clave>_<km>.bin`
 `"RN1"` · N (1 byte, 48) · km (2, big endian) · nº de imágenes (1) · flags (1: bit0 radar, bit1 nubes)
@@ -20,6 +21,7 @@ Casillas: 0 nada · 1-3 nubes · 4-9 lluvia (muy débil → extrema) · 10-12 ni
 ## Fuentes y créditos
 - Radar: [RainViewer](https://www.rainviewer.com) (API pública gratuita; requiere citarlo).
 - Nubosidad: [Open-Meteo](https://open-meteo.com) (gratuito para uso no comercial).
+- Pueblos del mapa: [GeoNames](https://www.geonames.org) (cities5000, CC BY 4.0).
 
 ## Probar en local
 ```

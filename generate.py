@@ -6,11 +6,18 @@ Para cada ubicación de locations.json y cada radio (10, 25, 50, 100, 150, 200 k
 con las 5 últimas imágenes de radar alrededor de esa ubicación, listas para que el cubito las anime
 como un GIF. La clave es lat y lon ×100 redondeadas ("4149_214"), igual que locationKey() en el
 firmware. Para añadir una ubicación: añadirla a locations.json y hacer push.
-(Para la primera ubicación también escribe radar_<km>.bin, por compatibilidad con el firmware 0.6.0.)
+Escribe dos versiones de cada archivo:
+    radar2_<clave>_<km>.bin  (firmware >= 0.7.5) "RN2": además lleva los pueblos cercanos
+    radar_<clave>_<km>.bin   (firmware 0.7.0-0.7.4) "RN1"
+    radar_<km>.bin           (firmware 0.6.0, solo la primera ubicación) "RN1"
 
-Formato:
+Formato RN1:
     "RN1" | N (1 byte) | km (2, big endian) | n_imágenes (1) | flags (1)
     y por cada imagen:  hora unix (4, big endian) | N*N/2 bytes (casillas de 4 bits, 2 por byte)
+Formato RN2: igual, pero tras flags va  n_pueblos (1)  y  n_pueblos × [x (1) | y (1) | nombre (8)],
+con x, y en píxeles del mapa del cubito (0-191, centro 96) y el nombre en ASCII relleno con ceros.
+Los pueblos salen de GeoNames (cities1000, CC BY 4.0): se descarga solo cuando hay una ubicación
+nueva y el resultado se guarda en cache/places_<clave>.json.
 
 Casillas: 0 nada · 1-3 nubes · 4-9 lluvia (muy débil → extrema) · 10-12 nieve.
 flags: bit0 = hay radar, bit1 = hay nubes.
@@ -31,6 +38,7 @@ Uso:
 
 import argparse
 import glob
+import io
 import json
 import math
 import os
@@ -38,6 +46,7 @@ import struct
 import sys
 import time
 import urllib.request
+import zipfile
 
 import tinypng
 
@@ -51,6 +60,13 @@ CLOUD_BUDGET = 8000              # consultas/día a Open-Meteo como máximo
 MAPS_URL = "https://api.rainviewer.com/public/weather-maps.json"
 METEO_URL = "https://api.open-meteo.com/v1/forecast"
 UA = {"User-Agent": "cuadro-radar/1.0 (+github actions)"}
+GEONAMES_URL = "https://download.geonames.org/export/dump/cities1000.zip"
+GEONAMES_FILE = "cities1000.txt"
+# códigos de GeoNames que son barrios o lugares abandonados, no pueblos
+SKIP_CODES = {"PPLX", "PPLH", "PPLQ", "PPLW", "PPLCH"}
+PLACES_RANGE_KM = 230            # pueblos guardados por ubicación (cubre el radio máximo)
+MAP_HALF = 96                    # medio mapa del cubito en píxeles (RAIN_MAP / 2)
+MAX_PLACES = 10
 
 
 def log(msg):
@@ -170,6 +186,103 @@ def cloud_cat(grid, fy, fx):
     return 0 if cc < 30 else (1 if cc < 60 else (2 if cc < 85 else 3))
 
 
+# ───────────────────────── pueblos (GeoNames) ─────────────────────────
+
+_geonames = None
+
+
+def geonames():
+    """Lista (nombre_ascii, lat, lon, población) de los pueblos de más de 1000 habitantes."""
+    global _geonames
+    if _geonames is None:
+        log("GeoNames: descargando %s…" % GEONAMES_FILE)
+        z = zipfile.ZipFile(io.BytesIO(get(GEONAMES_URL, timeout=120)))
+        _geonames = []
+        with z.open(GEONAMES_FILE) as f:
+            for line in io.TextIOWrapper(f, encoding="utf-8"):
+                c = line.rstrip("\n").split("\t")
+                if len(c) < 15 or c[7] in SKIP_CODES:
+                    continue
+                try:
+                    _geonames.append((c[2], float(c[4]), float(c[5]), int(c[14] or 0)))
+                except (IndexError, ValueError):
+                    pass
+        log("GeoNames: %d ciudades" % len(_geonames))
+    return _geonames
+
+
+def load_places(cache, key, center):
+    """Pueblos a menos de PLACES_RANGE_KM del centro, de más a menos habitantes (con caché)."""
+    path = os.path.join(cache, "places_%s.json" % key)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    lat0, lon0 = center
+    kx = 111.32 * math.cos(math.radians(lat0))
+    near = []
+    for name, lat, lon, pop in geonames():
+        dx, dy = (lon - lon0) * kx, (lat - lat0) * 111.32
+        if abs(dx) < PLACES_RANGE_KM and abs(dy) < PLACES_RANGE_KM:
+            near.append({"name": name, "dx": round(dx, 2), "dy": round(dy, 2), "pop": pop})
+    near.sort(key=lambda p: -p["pop"])
+    # todos los cercanos (para radios pequeños) + los 300 mayores del resto (para radios grandes)
+    close = [p for p in near if abs(p["dx"]) < 30 and abs(p["dy"]) < 30]
+    far = [p for p in near if not (abs(p["dx"]) < 30 and abs(p["dy"]) < 30)][:300]
+    near = sorted(close + far, key=lambda p: -p["pop"])
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(near, f)
+    log("Pueblos %s: %d a menos de %d km" % (key, len(near), PLACES_RANGE_KM))
+    return near
+
+
+def short_name(name):
+    """Nombre para la pantalla: ASCII, mayúsculas, máx. 8 letras.
+    "Sant Cugat del Valles" -> "ST CUGAT", "L'Hospitalet de Llobregat" -> "HOSPITAL",
+    "Vilanova i la Geltru" -> "VILANOVA", "Freiburg im Breisgau" -> "FREIBURG"."""
+    n = " " + "".join(ch for ch in name.upper() if 32 <= ord(ch) < 127) + " "
+    for cut in (" DE ", " DEL ", " D'", " DELS ", " DES ", " DU ", " I ", " Y ", " IM ", " AM ", " AN ",
+                " BEI ", " SUR ", " EN ", " SOBRE ", " DO ", " DA ", " ("):
+        k = n.find(cut, 2)
+        if k > 2:
+            n = n[:k] + " "
+    n = n.strip()
+    for art in ("L'", "LA ", "EL ", "LES ", "LOS ", "LAS ", "LE "):
+        if n.startswith(art) and len(n) > len(art) + 2:
+            n = n[len(art):]
+    for pre in ("SANTA ", "SANT ", "SAINTE ", "SAINT ", "SANTO ", "SAN ", "SANKT "):
+        if n.startswith(pre):
+            n = "ST " + n[len(pre):]
+            break
+    return n[:8].strip()
+
+
+def pick_places(near, km):
+    """Elige hasta MAX_PLACES pueblos dentro del mapa, de mayor a menor, sin que se pisen."""
+    chosen = []
+    for p in near:
+        x = MAP_HALF + p["dx"] / km * MAP_HALF
+        y = MAP_HALF - p["dy"] / km * MAP_HALF
+        name = short_name(p["name"])
+        w = 6 * len(name) + 4
+        if not name or x < 2 or y < 5 or x + w > 2 * MAP_HALF - 2 or y > 2 * MAP_HALF - 6:
+            continue
+        if abs(x - MAP_HALF) < 22 and abs(y - MAP_HALF) < 10:      # no tapar el centro
+            continue
+        if any(abs(x - cx) < max(w, cw) and abs(y - cy) < 11 for cx, cy, _, cw in chosen):
+            continue
+        chosen.append((x, y, name, w))
+        if len(chosen) >= MAX_PLACES:
+            break
+    return [(int(round(x)), int(round(y)), name) for x, y, name, _ in chosen]
+
+
+def places_blob(places):
+    out = bytes([len(places)])
+    for x, y, name in places:
+        out += bytes([max(0, min(255, x)), max(0, min(255, y))]) + name.encode("ascii")[:8].ljust(8, b"\0")
+    return out
+
+
 # ───────────────────────── caché ─────────────────────────
 
 def pack(cats):
@@ -253,6 +366,11 @@ def main():
     for li, loc in enumerate(locations):
         center = (float(loc["lat"]), float(loc["lon"]))
         key = location_key(*center)
+        try:
+            near = load_places(cache, key, center)
+        except Exception as e:
+            log("Pueblos %s: error (%s), sin pueblos" % (key, e))
+            near = []
         for km in RADII:
             clouds = load_clouds(cache, key, center, km, cloud_every)
             blobs, radar_ok = [], True
@@ -269,16 +387,24 @@ def main():
                 if args.preview == km and li == 0 and fr is frames[-1]:
                     print(ascii_map(cats))
             flags = (1 if radar_ok else 0) | (2 if clouds else 0)
-            out = b"RN1" + struct.pack(">BHBB", N, km, len(blobs), flags) + b"".join(blobs)
-            write_atomic(os.path.join(args.data, "radar_%s_%d.bin" % (key, km)), out)
+            frames_blob = b"".join(blobs)
+            head = struct.pack(">BHBB", N, km, len(blobs), flags)
+            places = pick_places(near, km)
+            out2 = b"RN2" + head + places_blob(places) + frames_blob
+            out1 = b"RN1" + head + frames_blob
+            write_atomic(os.path.join(args.data, "radar2_%s_%d.bin" % (key, km)), out2)
+            write_atomic(os.path.join(args.data, "radar_%s_%d.bin" % (key, km)), out1)   # firmware 0.7.0-0.7.4
             if li == 0:
-                write_atomic(os.path.join(args.data, "radar_%d.bin" % km), out)  # firmware 0.6.0
-            log("%s radar_%s_%d.bin: %d imágenes, %d bytes, flags=%d" % (
-                loc.get("name", "?"), key, km, len(blobs), len(out), flags))
+                write_atomic(os.path.join(args.data, "radar_%d.bin" % km), out1)          # firmware 0.6.0
+            log("%s %s %d km: %d imágenes, %d pueblos (%s), flags=%d" % (
+                loc.get("name", "?"), key, km, len(blobs), len(places), ", ".join(p[2] for p in places), flags))
 
     # borrar de la caché lo que ya no se usa (imágenes viejas y ubicaciones quitadas)
     keep_times = {fr.time for fr in frames}
     keys = {location_key(float(l["lat"]), float(l["lon"])) for l in locations}
+    for p in glob.glob(os.path.join(cache, "places_*.json")):
+        if os.path.basename(p)[7:-5] not in keys:
+            os.remove(p)
     for p in glob.glob(os.path.join(cache, "rain_*.bin")):
         parts = os.path.basename(p)[:-4].split("_")   # rain_<t>_<lat>_<lon>_<km>
         if len(parts) != 5 or int(parts[1]) not in keep_times or "%s_%s" % (parts[2], parts[3]) not in keys:
